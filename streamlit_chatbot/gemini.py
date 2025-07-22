@@ -1,13 +1,22 @@
 import streamlit as st
 import pandas as pd
-## Creating a Simple Streamlit Chatbot
+import google.generativeai as genai
+
+# Configure Gemini API
+GOOGLE_API_KEY = "AIzaSyBA0baWym2SsTDCwRqzuTuHZjoxvtMqUE8"
+genai.configure(api_key=GOOGLE_API_KEY)
+model = genai.GenerativeModel('gemini-1.5-flash')
 
 def initialize_session_state():
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+def get_gemini_response(prompt):
+    response = model.generate_content(prompt)
+    return response.text
+
 def main():
-    st.title("Simple Chatbot")
+    st.title("Gemini AI Chatbot")
     
     initialize_session_state()
 
@@ -17,7 +26,7 @@ def main():
             st.write(message["content"])
 
     # Chat input
-    if prompt := st.chat_input("What's on your mind?"):
+    if prompt := st.chat_input("Chat with Gemini"):
         # Display user message
         with st.chat_message("user"):
             st.write(prompt)
@@ -25,12 +34,16 @@ def main():
         # Add user message to history
         st.session_state.messages.append({"role": "user", "content": prompt})
         
-        # Add simple bot response
-        response = f"You said: {prompt}"
+        # Get Gemini response
+        response = get_gemini_response(prompt)
+        
+        # Display assistant response
         with st.chat_message("assistant"):
             st.write(response)
         
+        # Add assistant response to history
         st.session_state.messages.append({"role": "assistant", "content": response})
+
 
 # Sample DataFrame
 df = pd.DataFrame({
@@ -54,6 +67,9 @@ price_range = st.sidebar.slider(
     max_value=3000,
     value=(0, 3000)
 )
+
+
+
 
 
 
