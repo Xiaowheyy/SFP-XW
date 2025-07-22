@@ -69,6 +69,21 @@ price_range = st.sidebar.slider(
 )
 
 
+period = st.sidebar.selectbox(
+    "Select Historical Period",
+    ["1990s", "2000s", "2010s", "2020s"]
+)
+
+history_dict = {
+    "1990s": "The idea was first conceived in a university lab.",
+    "2000s": "The company received its first round of venture capital funding.",
+    "2010s": "It expanded globally and entered new markets.",
+    "2020s": "Focusing on AI, green tech, and ethical innovation."
+}
+
+st.sidebar.write(history_dict[period])
+
+
 
 
 
