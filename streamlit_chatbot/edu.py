@@ -1,94 +1,164 @@
 import streamlit as st
-from PIL import Image
-import pytesseract
 import pandas as pd
-import datetime
+import pytesseract
 import google.generativeai as genai
-import os
 import io
+import fitz  # PyMuPDF
+import cv2
+import numpy as np
+from PIL import Image
+import datetime
+import shutil
+import json
 
-# Set your Gemini API key
+# --- Setup ---
+st.set_page_config(page_title="AI Exam Checker", layout="wide")
+st.title("📚 AI Answer Checker for Students")
+
+# --- Tesseract Setup ---
+TESSERACT_PATH = shutil.which("tesseract")
+if TESSERACT_PATH:
+    pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
+else:
+    st.error("❌ Tesseract-OCR is not installed. Please install it in your Codespace.")
+
+# --- Gemini Setup ---
 genai.configure(api_key="YOUR_GEMINI_API_KEY")
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel("gemini-1.5-flash")
 
-# Initialize session state for history
-if "history" not in st.session_state:
-    st.session_state.history = []
+# --- Session History ---
+if "results" not in st.session_state:
+    st.session_state.results = []
 
-# OCR Function
-def extract_text_from_image(image: Image.Image):
-    return pytesseract.image_to_string(image)
+# --- Helper Functions ---
+def extract_images_from_pdf(file):
+    images = []
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    for page in doc:
+        pix = page.get_pixmap()
+        img = Image.open(io.BytesIO(pix.tobytes()))
+        images.append(img)
+    return images
 
-# Analyze with Gemini
-def analyze_student_answer(student_name, answer_text, correct_answer):
+def extract_answer_key_pdf(file):
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    text = "\n".join(page.get_text() for page in doc)
+    answer_key = {}
+    for line in text.splitlines():
+        if "," in line:
+            parts = line.split(",", 1)
+            answer_key[parts[0].strip()] = parts[1].strip()
+    return answer_key
+
+def detect_circles_by_color(image, lower_color, upper_color):
+    np_img = np.array(image.convert("RGB"))
+    hsv = cv2.cvtColor(np_img, cv2.COLOR_RGB2HSV)
+    mask = cv2.inRange(hsv, lower_color, upper_color)
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = [cv2.boundingRect(c) for c in contours if cv2.contourArea(c) > 100]
+    texts = []
+    for x, y, w, h in boxes:
+        roi = np_img[y:y+h, x:x+w]
+        text = pytesseract.image_to_string(Image.fromarray(roi)).strip()
+        if text:
+            texts.append(text)
+    return texts
+
+def analyze_answer(student_answer, correct_answer):
     prompt = f"""
-    You are an exam evaluator. Analyze this student's answer:
+    Student Answer: {student_answer}
+    Correct Answer: {correct_answer}
 
-    Student Name: {student_name}
+    Is the student answer correct?
 
-    Student Answer:
-    {answer_text}
-
-    Expected Answer:
-    {correct_answer}
-
-    Provide:
-    1. Mistake(s) found
-    2. Type of mistake (e.g., spelling, misunderstanding, calculation)
-    3. Suggestions for improvement
+    Respond with JSON only:
+    {{
+        "Feedback": "Correct" or "Wrong",
+        "Category": "Wrong Concept" or "Calculation Error" or "Incomplete Answer" or "Other"
+    }}
     """
-    response = model.generate_content(prompt)
-    return response.text
+    try:
+        response = model.generate_content(prompt).text
+        result = json.loads(response)
+        return result.get("Feedback", "Unknown"), result.get("Category", "")
+    except Exception as e:
+        return "⚠️ Error", str(e)
 
-# Main UI
-st.title("📚 AI Exam Paper Analyzer")
-st.markdown("Upload scanned or photographed student exam answers. The app detects and categorizes mistakes using AI.")
+# --- Upload Section ---
+st.header("📤 Upload Section")
+col1, col2 = st.columns(2)
 
-uploaded_files = st.file_uploader("📤 Upload Exam Paper Images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
-correct_answer = st.text_area("✅ Enter the Correct Answer", "", height=100)
+with col1:
+    paper_file = st.file_uploader("Upload Student Answer Sheet (Image or PDF)", type=["png", "jpg", "jpeg", "pdf"])
 
-if uploaded_files and correct_answer:
-    for file in uploaded_files:
-        st.divider()
-        st.subheader(f"📄 Processing: {file.name}")
+with col2:
+    key_type = st.selectbox("Answer Key Format", ["CSV", "PDF"])
+    key_file = st.file_uploader("Upload Answer Key", type=["csv", "pdf"])
 
-        # Input: Student name
-        student_name = st.text_input(f"👤 Enter Student Name for {file.name}", value=file.name.split('.')[0])
+# --- Load Answer Key ---
+answer_key = {}
+if key_file:
+    if key_type == "CSV":
+        df = pd.read_csv(key_file)
+        answer_key = dict(zip(df["Question"], df["Correct Answer"]))
+    elif key_type == "PDF":
+        answer_key = extract_answer_key_pdf(key_file)
 
-        image = Image.open(file)
-        st.image(image, caption="Uploaded Paper", use_column_width=True)
+    if answer_key:
+        st.success("✅ Answer Key Loaded")
+    else:
+        st.warning("⚠️ No valid answers found in the key.")
 
-        extracted_text = extract_text_from_image(image)
-        st.markdown("#### ✏️ Extracted Answer:")
-        st.text_area("Extracted Text", extracted_text, height=150, key=f"extracted_{file.name}")
+# --- Analyze Student Answers ---
+if paper_file and answer_key:
+    st.header("🧠 Answer Analysis")
+    student_name = st.text_input("👤 Student Name", value=paper_file.name.split(".")[0])
 
-        if st.button(f"🧠 Analyze Mistakes for {student_name}", key=f"analyze_{file.name}"):
-            result = analyze_student_answer(student_name, extracted_text, correct_answer)
+    if paper_file.type == "application/pdf":
+        images = extract_images_from_pdf(paper_file)
+    else:
+        images = [Image.open(paper_file)]
 
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    results = []
+    for img in images:
+        student_answers = detect_circles_by_color(img, (90, 50, 50), (130, 255, 255))  # Blue
+        correct_answers = detect_circles_by_color(img, (0, 50, 50), (10, 255, 255)) + \
+                          detect_circles_by_color(img, (160, 50, 50), (180, 255, 255))  # Red
 
-            result_data = {
-                "Student Name": student_name,
-                "File": file.name,
-                "Answer": extracted_text,
-                "Correct Answer": correct_answer,
-                "Feedback": result,
-                "Timestamp": timestamp,
-            }
+        for student, correct in zip(student_answers, correct_answers):
+            feedback, category = analyze_answer(student, correct)
+            results.append({
+                "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "Student": student_name,
+                "Student Answer": student,
+                "Correct Answer": correct,
+                "AI Feedback": feedback,
+                "Mistake Type": category if feedback.lower() == "wrong" else ""
+            })
+    st.session_state.results.extend(results)
+    st.success("✅ Analysis Complete!")
 
-            st.session_state.history.append(result_data)
+# --- Results Display ---
+if st.session_state.results:
+    st.header("📋 Answer Report")
+    df_results = pd.DataFrame(st.session_state.results)
 
-            st.success("✅ Mistake analysis complete!")
-            st.markdown("### 📋 Feedback")
-            st.markdown(result)
+    total = len(df_results)
+    correct = df_results["AI Feedback"].str.lower().eq("correct").sum()
+    wrong = total - correct
 
-# History Viewer
-if st.session_state.history:
-    st.divider()
-    st.subheader("🗃️ Previous Analyses")
-    df_history = pd.DataFrame(st.session_state.history)
-    st.dataframe(df_history[["Timestamp", "Student Name", "File"]])
+    st.success(f"✅ Score: {correct}/{total} correct")
+    st.progress(correct / total)
 
-    if st.download_button("⬇️ Download Results as CSV", data=df_history.to_csv(index=False),
-                          file_name="student_analysis_results.csv"):
-        st.success("CSV downloaded!")
+    df_wrong = df_results[df_results["AI Feedback"].str.lower() == "wrong"]
+
+    if df_wrong.empty:
+        st.info("🎉 All answers are correct!")
+    else:
+        st.subheader("❌ Wrong Answers")
+        st.dataframe(df_wrong[["Student Answer", "Correct Answer", "Mistake Type"]])
+        st.download_button(
+            "⬇️ Download Wrong Answer Report",
+            df_wrong[["Student", "Student Answer", "Correct Answer", "Mistake Type"]].to_csv(index=False),
+            file_name=f"{df_wrong.iloc[0]['Student']}_wrong_answers.csv"
+        )
