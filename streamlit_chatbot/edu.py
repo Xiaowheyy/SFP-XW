@@ -6,7 +6,7 @@ import io
 import fitz  # PyMuPDF
 import cv2
 import numpy as np
-from PIL import Image
+import PIL.Image as Image
 import datetime
 import shutil
 import json
@@ -20,13 +20,13 @@ TESSERACT_PATH = shutil.which("tesseract")
 if TESSERACT_PATH:
     pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
 else:
-    st.error("❌ Tesseract-OCR is not installed. Please install it in your Codespace.")
+    st.error("❌ Tesseract-OCR is not installed or not in PATH.")
 
-# --- Gemini Setup ---
-genai.configure(api_key="YOUR_GEMINI_API_KEY")
+# --- Gemini API Setup ---
+genai.configure(api_key="AIzaSyBA0baWym2SsTDCwRqzuTuHZjoxvtMqUE8")  # <-- Replace with your actual API key
 model = genai.GenerativeModel("gemini-1.5-flash")
 
-# --- Session History ---
+# --- Session State ---
 if "results" not in st.session_state:
     st.session_state.results = []
 
@@ -46,8 +46,8 @@ def extract_answer_key_pdf(file):
     answer_key = {}
     for line in text.splitlines():
         if "," in line:
-            parts = line.split(",", 1)
-            answer_key[parts[0].strip()] = parts[1].strip()
+            q, a = line.split(",", 1)
+            answer_key[q.strip()] = a.strip()
     return answer_key
 
 def detect_circles_by_color(image, lower_color, upper_color):
@@ -69,23 +69,18 @@ def analyze_answer(student_answer, correct_answer):
     Student Answer: {student_answer}
     Correct Answer: {correct_answer}
 
-    Is the student answer correct?
-
-    Respond with JSON only:
-    {{
-        "Feedback": "Correct" or "Wrong",
-        "Category": "Wrong Concept" or "Calculation Error" or "Incomplete Answer" or "Other"
-    }}
+    Is the student's answer correct or wrong?
+    Respond only in JSON format: {{ "Feedback": "Correct" }} or {{ "Feedback": "Wrong" }}
     """
     try:
         response = model.generate_content(prompt).text
         result = json.loads(response)
-        return result.get("Feedback", "Unknown"), result.get("Category", "")
+        return result.get("Feedback", "Unknown")
     except Exception as e:
-        return "⚠️ Error", str(e)
+        return f"⚠️ Error: {e}"
 
 # --- Upload Section ---
-st.header("📤 Upload Section")
+st.header("📤 Upload Files")
 col1, col2 = st.columns(2)
 
 with col1:
@@ -107,11 +102,11 @@ if key_file:
     if answer_key:
         st.success("✅ Answer Key Loaded")
     else:
-        st.warning("⚠️ No valid answers found in the key.")
+        st.warning("⚠️ No valid answers found.")
 
-# --- Analyze Student Answers ---
+# --- Analyze ---
 if paper_file and answer_key:
-    st.header("🧠 Answer Analysis")
+    st.header("🔎 AI Answer Analysis")
     student_name = st.text_input("👤 Student Name", value=paper_file.name.split(".")[0])
 
     if paper_file.type == "application/pdf":
@@ -126,39 +121,43 @@ if paper_file and answer_key:
                           detect_circles_by_color(img, (160, 50, 50), (180, 255, 255))  # Red
 
         for student, correct in zip(student_answers, correct_answers):
-            feedback, category = analyze_answer(student, correct)
+            feedback = analyze_answer(student, correct)
             results.append({
                 "Timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "Student": student_name,
                 "Student Answer": student,
                 "Correct Answer": correct,
                 "AI Feedback": feedback,
-                "Mistake Type": category if feedback.lower() == "wrong" else ""
+                "Mistake Type": "" if feedback.lower() == "correct" else "Wrong Answer"
             })
+
     st.session_state.results.extend(results)
     st.success("✅ Analysis Complete!")
 
-# --- Results Display ---
+# --- Display Results ---
 if st.session_state.results:
-    st.header("📋 Answer Report")
+    st.header("📊 Answer Summary")
     df_results = pd.DataFrame(st.session_state.results)
 
     total = len(df_results)
-    correct = df_results["AI Feedback"].str.lower().eq("correct").sum()
-    wrong = total - correct
+    wrong = len(df_results[df_results["AI Feedback"].str.lower() == "wrong"])
+    score = total - wrong
 
-    st.success(f"✅ Score: {correct}/{total} correct")
-    st.progress(correct / total)
+    st.subheader("🔢 Total Score")
+    st.success(f"Total Score: {score}/{total}")
+    st.progress(score / total if total > 0 else 0)
 
+    # Show wrong answers
+    st.subheader("❌ Wrong Answers Table")
     df_wrong = df_results[df_results["AI Feedback"].str.lower() == "wrong"]
 
     if df_wrong.empty:
-        st.info("🎉 All answers are correct!")
+        st.success("🎉 All answers are correct!")
     else:
-        st.subheader("❌ Wrong Answers")
         st.dataframe(df_wrong[["Student Answer", "Correct Answer", "Mistake Type"]])
+
         st.download_button(
-            "⬇️ Download Wrong Answer Report",
+            "⬇️ Download Wrong Answers",
             df_wrong[["Student", "Student Answer", "Correct Answer", "Mistake Type"]].to_csv(index=False),
-            file_name=f"{df_wrong.iloc[0]['Student']}_wrong_answers.csv"
+            file_name="wrong_answers.csv"
         )
