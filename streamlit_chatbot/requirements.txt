@@ -2,3 +2,4 @@ pillow
 pytesseract 
 pandas 
 google-generativeai
+PyMuPDF
